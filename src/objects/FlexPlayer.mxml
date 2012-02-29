@@ -1,0 +1,539 @@
+<?xml version="1.0" encoding="utf-8"?>
+<mx:WindowedApplication 
+	xmlns:mx="http://www.adobe.com/2006/mxml" 
+	xmlns:obj="objects.*"
+	layout="absolute" 
+	creationComplete="Init()" 
+	closing="Closing()"
+	width="410" 
+	height="210"
+	name="AirTunes">
+	
+	<mx:Script>
+		<![CDATA[
+			import mx.messaging.AbstractConsumer;
+			import objects.FileSerializer;
+			import objects.UserPreferences;
+			import mx.core.Window;
+			import mx.binding.utils.ChangeWatcher;
+			import objects.Song;
+			import mx.events.SliderEvent;
+			import mx.events.ListEvent;
+			import mx.collections.ArrayCollection;
+			import mx.controls.Alert;
+			import mx.rpc.events.FaultEvent;
+			import mx.rpc.events.ResultEvent;
+			import objects.Player;
+			
+			/**
+			 * Constants to make working with states easier. 
+			 */
+			private const GRIDSTATE:String = 'GridState';
+			private const TIMERSTATE:String = 'TimerState';
+			private const COMPACTSTATE:String = '';
+						
+			/**
+			 * Used to download the current song
+			 */
+			private var _FileToDownload:FileReference;
+			
+			/**
+			 * Used when downloading songs, to include a decent name in the messages.
+			 */
+			private var _FileName:String;
+			
+			/**
+			 * True if we're currently saving a song.
+			 */
+			private var _Downloading:Boolean = false;
+			
+			 /**
+			 * The user preferences. This object will get serialized into settings.dat
+			 */
+			private var _UserPreferences:UserPreferences;
+			
+			[Bindable]
+			private var _XMLUri:String;
+			
+			 /**
+			 * Sets the XML Uri location
+			 */
+			 public function set XMLUri(uri:String):void
+			 {
+			 	_XMLUri = uri;
+			 }
+			
+			/**
+			 * Init
+			 */
+			private function Init():void
+			{   
+				var appXml:XML = NativeApplication.nativeApplication.applicationDescriptor;
+				var ns:Namespace = appXml.namespace();
+
+				var appVersion:String = appXml.ns::version[0];
+				var appName:String = appXml.ns::filename[0];
+
+				title = appName + " " + appVersion;
+
+				playButton.addEventListener(MouseEvent.CLICK, PlaySound);
+				stopButton.addEventListener(MouseEvent.CLICK, StopSound);
+				random.addEventListener(MouseEvent.CLICK, Next);
+				fullMode.addEventListener(MouseEvent.CLICK, Switch);
+				timer.addEventListener(MouseEvent.CLICK, Switch);
+				saveSong.addEventListener(MouseEvent.CLICK, SaveCurrent);
+				
+				_UserPreferences = FileSerializer.readObjectFromFile("settings.dat") as UserPreferences;
+
+				if( _UserPreferences ) {
+					nativeWindow.x = _UserPreferences.AppPosX;
+					nativeWindow.y = _UserPreferences.AppPosY;
+					
+					SetState( _UserPreferences.CurrentState );
+					
+					if ( _UserPreferences.EnableAlarm )
+					{
+						ClockTimer.SetAlarmTimer( _UserPreferences.WakeUpHour, _UserPreferences.WakeUpMinute );
+						ClockTimer.TriggerMaxVolume = _UserPreferences.MaxVolume;
+					}
+				} else {
+					_UserPreferences = new UserPreferences();
+					
+					nativeWindow.x = (Capabilities.screenResolutionX - nativeWindow.width) / 2;
+                	nativeWindow.y = (Capabilities.screenResolutionY - nativeWindow.height) / 2;
+				}		
+													
+				SongsXML.send();
+			}
+			
+			/**
+			 * Closing the app, saving the settings
+			 */
+			private function Closing():void
+			{     
+				_UserPreferences.CurrentState = currentState;
+	       		     				
+				_UserPreferences.AppPosX = nativeWindow.x;
+				_UserPreferences.AppPosY = nativeWindow.y;
+					
+				if ( DozeStepper )
+					_UserPreferences.DozeOff = DozeStepper.value;
+	
+				if ( WakeUpHour )
+					_UserPreferences.WakeUpHour = WakeUpHour.value;
+				
+				if ( WakeUpMinutes )
+					_UserPreferences.WakeUpMinute = WakeUpMinutes.value;
+	
+				if ( WakeUpCheckbox )
+					_UserPreferences.EnableAlarm = WakeUpCheckbox.selected;  
+					
+				if ( MaxVolumeCheckbox )
+					_UserPreferences.MaxVolume = MaxVolumeCheckbox.selected;  			
+				
+       			FileSerializer.writeObjectToFile(_UserPreferences, "settings.dat");
+			}
+			
+			/**
+			 * Used to set the play button to true if the selected song is not the current song.
+			 * Only used in full mode.
+			 */
+			private function GridChangeSelected():void
+			{
+				playSelectedButton.enabled = 
+					(GridSongs.selectedItem as Song).Location != player.SongPlaylist.CurrentPlayingSong.Location;
+			}
+			
+			/**
+			 * Play the song of choice
+			 */
+            private function PlaySelected():void
+            {
+            	if (GridSongs.selectedItem != null)
+            	{
+	             	playSelectedButton.enabled = false;
+	                player.SelectSong((GridSongs.selectedItem as Song));
+             	} else {
+             		Alert.show("Please select a song first.", "Error");
+             	}
+            }
+			
+			/**
+			 * Start playing the music.
+			 */
+			private function PlaySound(event:MouseEvent):void
+			{
+				player.PlaySound();
+			}
+			
+			/**
+			 * Stop playing the music.
+			 */
+			private function StopSound(event:MouseEvent):void
+			{
+				player.StopSound();
+			}
+			
+			/**
+			 * Read the online XML file containing all the song data.
+			 */
+			private function ReadXML(event:ResultEvent):void
+			{
+				if (SongsXML.lastResult != null)
+				{
+					player.CreatePlaylist(SongsXML.lastResult.playlist.trackList.track);
+					player.SelectRandomSong();
+					
+					paneel.enabled = true;  
+				}
+				else
+				{
+					Alert.show("An error has occured fetching the songs.", "Oops");
+				}				 
+			}
+
+			/**
+			 * Oops, something went wrong. Used to show a message.
+			 */
+			private function Oops(event:FaultEvent):void
+			{
+				Alert.show("An error has occured.", "Oops");
+			}
+			
+			/**
+			 * Play the next song, chose randomly.
+			 */
+			private function Next(event:MouseEvent):void
+			{
+				player.SelectRandomSong();
+			}
+			
+			/**
+			 * Volume adjusting
+			 */
+			private function SliderChange(event:SliderEvent):void
+			{
+				player.Volume = event.value;
+			}			
+			
+			/**
+			 * Switch between modes.
+			 */
+			private function Switch(event:MouseEvent):void
+			{		
+				var current:String = currentState;
+						
+				if ( event.currentTarget.id == "fullMode" ) 
+				{
+					if (currentState == GRIDSTATE)
+					{
+						SetState( COMPACTSTATE );	
+					} 
+					else 
+					{
+						SetState( GRIDSTATE );
+					}
+				} else if ( event.currentTarget.id == "timer" ) {
+					if (currentState == TIMERSTATE)
+					{
+						SetState( _UserPreferences.PreviousState );	
+					} 
+					else 
+					{
+						SetState( TIMERSTATE );
+					}
+				}				
+				
+				_UserPreferences.PreviousState = current;
+			}
+			
+			/**
+			 * Methode to help set the state
+			 */
+			private function SetState(state:String):void
+			{
+				var newState:String;
+				
+				switch(state)
+				{	
+					case GRIDSTATE:
+						height = 680;	
+						width = 460;
+						newState = GRIDSTATE;
+						break;
+					case TIMERSTATE:
+						height = 210;
+						width = 410;
+						newState = TIMERSTATE;
+						break;
+					default:
+						height = 210;
+						width = 410;
+						newState = COMPACTSTATE;
+						break;
+				}
+				
+				currentState = newState;
+			}
+			
+			/**
+			 * Save selected song.
+			 * Only used in full mode.
+			 */
+			private function SaveSelected():void
+			{			
+				if (GridSongs.selectedItem != null)
+            	{
+					Save(GridSongs.selectedItem as Song);
+             	} else {
+             		Alert.show("Please select a song first.", "Error");
+             	}
+			}
+
+			/**
+			 * Save current song.
+			 */
+			private function SaveCurrent(event:MouseEvent):void
+			{			
+				Save(player.SongPlaylist.CurrentPlayingSong);
+			}
+			
+			/**
+			 * Save function to unite the previous two.
+			 * Downloads the passed song.
+			 */
+			private function Save(song:Song):void
+			{
+				if 	(!_Downloading) 
+				{		         
+		            _FileName = song.Author + " - " + song.Title + ".mp3";
+		            
+		            var request:URLRequest = new URLRequest(song.Location);
+		            request.method = URLRequestMethod.GET;	
+					
+					_FileToDownload = new FileReference();
+					
+					_FileToDownload.addEventListener(Event.COMPLETE, DownloadFinished);
+					_FileToDownload.addEventListener(Event.SELECT, SelectDownload);
+					_FileToDownload.addEventListener(IOErrorEvent.IO_ERROR, ErrorDownload);
+					
+					_FileToDownload.download(request, _FileName);
+				} else {
+					Alert.show("Please wait until " + _FileName + " finishes downloading.", "Download");
+				}
+			}
+			
+			/**
+			 * Show message when download finished.
+			 */
+			private function DownloadFinished(event:Event):void
+			{
+				_Downloading = false;
+				Alert.show("Finished downloading:\n\n" + _FileName + ".", "Download");
+			}
+			
+			/**
+			 * When downloading starts, sets downloading to true.
+			 */
+			private function SelectDownload(event:Event):void
+			{
+				_Downloading = true;
+			}
+			
+			/**
+			 * Something went wrong during the download. 
+			 * Showing message to inform user.
+			 * Set downloading to false again.
+			 */
+			private function ErrorDownload(event:Event):void
+			{
+				_Downloading = false;				
+				Alert.show("An error has occured downloading the file " + _FileName + ".\n\nPlease try again.", "Download");
+			}
+			
+			/**
+			 * User clicked the doze checkbox
+			 */
+			private function DozeChange():void
+			{
+				if ( DozeCheckbox.selected )
+				{
+					ClockTimer.SetDozeTimer( DozeStepper.value );
+				} else {
+					ClockTimer.StopDoze();	
+				}
+			}
+			
+			/**
+			 * User clicked the "wake me up" checkbox
+			 */
+			private function WakeUpChange():void
+			{
+				if ( WakeUpCheckbox.selected )
+				{
+					ClockTimer.SetAlarmTimer( WakeUpHour.value, WakeUpMinutes.value );
+				} else {
+					ClockTimer.StopAlarm();	
+				}
+			}
+			
+			/**
+			 * WakeUpHour stepper has been created, setting the preferences.
+			 */
+			private function TimerViewCreated():void
+			{
+				ClockTimer.DozeBox = DozeCheckbox;
+				
+				DozeStepper.value = _UserPreferences.DozeOff;
+				WakeUpHour.value = _UserPreferences.WakeUpHour;
+				WakeUpMinutes.value = _UserPreferences.WakeUpMinute;
+				WakeUpCheckbox.selected = ClockTimer.IsAlarmEnabled;
+				MaxVolumeCheckbox.selected = _UserPreferences.MaxVolume;
+			}
+			
+			/**
+			 * Changed the value Hour stepper, need to reset alarm clock
+			 */
+			private function HourChange():void
+			{
+				if ( WakeUpCheckbox.selected )
+				{
+					ClockTimer.StopAlarm();
+					ClockTimer.SetAlarmTimer( WakeUpHour.value, WakeUpMinutes.value );
+				}
+			}
+			
+			/**
+			 * Changed the value Minute stepper, need to reset alarm clock
+			 */
+			private function MinuteChange():void
+			{
+				if ( WakeUpCheckbox.selected )
+				{
+					ClockTimer.StopAlarm();
+					ClockTimer.SetAlarmTimer( WakeUpHour.value, WakeUpMinutes.value );
+				}
+			}
+			
+			/**
+			 * Wether to set the volume to max before triggering the alarm clock. 
+			 */
+			private function MaxVolumeChange():void
+			{				
+				ClockTimer.TriggerMaxVolume = MaxVolumeCheckbox.selected;
+			}
+		]]>
+	</mx:Script>
+	
+	<mx:HTTPService id="SongsXML" 
+		url="{_XMLUri}" 
+		result="ReadXML(event)" 
+		fault="Oops(event)" />
+		
+	<obj:Player id="player" />
+	<obj:Clock id="ClockTimer" Player="{player}" />
+		
+	<mx:Panel title="Total: {player.SongPlaylist.Songs.length} songs - Played: {player.SongPlaylist.PlayedSongs} songs." 
+		id="paneel" width="100%" height="100%" enabled="false" horizontalAlign="center" verticalAlign="middle">
+		
+		<mx:Label id="currentAuthor" width="100%" textAlign="center" text="{player.SongPlaylist.CurrentPlayingSong.Author}"/>
+		<mx:Label id="currentTitle" width="100%" textAlign="center" text="{player.SongPlaylist.CurrentPlayingSong.Title}"/>
+	
+		<mx:HBox width="100%" horizontalAlign="center" id="hbox1">
+			<mx:Button id="playButton" label="Play" enabled="{!player.SongPlaylist.CurrentPlayingSong.IsPlaying}"/>
+			<mx:Button id="stopButton" label="Stop" enabled="{player.SongPlaylist.CurrentPlayingSong.IsPlaying}" />
+		</mx:HBox>
+		
+		<mx:HBox width="100%" horizontalAlign="center" id="hbox2">
+			<mx:Label text="Volume"  id="volumeLabel"/>
+			<mx:HSlider id="volumeSlider"
+            minimum="0"
+            maximum="100"
+            liveDragging="true"
+            snapInterval="5"
+            dataTipPrecision="0"
+            tickInterval="5"
+            change="SliderChange(event)"  
+            value="{player.Volume}"/>
+		</mx:HBox>
+		
+		<mx:HBox height="30" width="100%" horizontalAlign="center" id="hbox3">
+			<mx:Button id="random" label="Next Song" enabled="{!player.IsSelectingANewSong}"/>
+			<mx:Button id="saveSong" label="Save Current" />
+			<mx:Button id="timer" label="Timer" />
+			<mx:Button id="fullMode" label="Full Mode" />
+		</mx:HBox>
+	</mx:Panel>
+		
+	<mx:states>
+		<mx:State name="{GRIDSTATE}">
+			<mx:AddChild relativeTo="{hbox1}" position="before">
+				<mx:DataGrid id="GridSongs" width="100%" height="100%"
+								dataProvider="{player.SongPlaylist.Songs}" 
+								change="{GridChangeSelected()}"
+								doubleClickEnabled="true" 
+								itemDoubleClick="{PlaySelected()}">
+					<mx:columns>
+						<mx:DataGridColumn dataField="Author" />
+						<mx:DataGridColumn dataField="Title" />
+					</mx:columns>
+				</mx:DataGrid>
+			</mx:AddChild>
+			<mx:AddChild relativeTo="{stopButton}" position="before">
+				<mx:Button id="playSelectedButton" label="Play Selected" click="{PlaySelected()}" 
+					enabled="{!player.SongPlaylist.CurrentPlayingSong.IsPlaying}" />
+			</mx:AddChild>
+			<mx:RemoveChild target="{playButton}"/>
+			<mx:SetProperty target="{fullMode}" name="label" value="Compact Mode" />
+			<mx:AddChild relativeTo="{saveSong}" position="before">
+				<mx:Button id="saveSelected" label="Save Selected" click="SaveSelected()"/>
+			</mx:AddChild>
+			<mx:RemoveChild target="{random}"/>
+			<mx:AddChild relativeTo="{stopButton}" position="before" target="{random}"/>
+			<mx:SetProperty target="{random}" name="label" value="Play Random"/>
+		</mx:State>
+		<mx:State name="{TIMERSTATE}">
+			<mx:SetProperty target="{timer}" name="label" value="Finished"/>
+			<mx:RemoveChild target="{playButton}"/>
+			<mx:RemoveChild target="{stopButton}"/>
+			<mx:RemoveChild target="{volumeLabel}"/>
+			<mx:RemoveChild target="{volumeSlider}"/>
+			<mx:RemoveChild target="{random}"/>
+			<mx:RemoveChild target="{saveSong}"/>
+			<mx:RemoveChild target="{fullMode}"/>
+			<mx:RemoveChild target="{currentTitle}"/>
+			<mx:RemoveChild target="{currentAuthor}"/>
+			<mx:AddChild relativeTo="{hbox1}" position="lastChild">
+				<mx:NumericStepper id="DozeStepper" minimum="2" maximum="999" value="20" />
+			</mx:AddChild>
+			<mx:AddChild relativeTo="{DozeStepper}" position="before">
+				<mx:CheckBox label="Play for" id="DozeCheckbox" change="DozeChange()" />
+			</mx:AddChild>
+			<mx:AddChild relativeTo="{hbox1}" position="lastChild">
+				<mx:Label text="minutes, so I can fall alseep."/>
+			</mx:AddChild>
+			<mx:AddChild relativeTo="{hbox2}" position="lastChild">
+				<mx:CheckBox label="Wake me up at" id="WakeUpCheckbox" change="WakeUpChange()" />
+			</mx:AddChild>
+			<mx:AddChild relativeTo="{hbox2}" position="lastChild">
+				<mx:NumericStepper id="WakeUpHour" minimum="0" maximum="24" value="7"  width="46" change="HourChange()"/>
+			</mx:AddChild>
+			<mx:AddChild relativeTo="{hbox2}" position="lastChild">
+				<mx:Label text=":"/>
+			</mx:AddChild>
+			<mx:AddChild relativeTo="{hbox2}" position="lastChild">
+				<mx:NumericStepper id="WakeUpMinutes" minimum="0" maximum="59" value="30"  width="46"  change="MinuteChange()"/>
+			</mx:AddChild>
+			<mx:AddChild relativeTo="{hbox3}" position="before">
+				<mx:HBox width="100%" horizontalAlign="left" id="hbox0" paddingLeft="30">					
+					<mx:CheckBox label="Wake me using maximum volume." id="MaxVolumeCheckbox" change="MaxVolumeChange()" creationComplete="TimerViewCreated()" />
+				</mx:HBox>
+			</mx:AddChild>
+			<mx:SetStyle target="{hbox1}" name="horizontalAlign" value="left"/>
+			<mx:SetStyle target="{hbox2}" name="horizontalAlign" value="left"/>
+			<mx:SetStyle target="{hbox1}" name="paddingLeft" value="30"/>
+			<mx:SetStyle target="{hbox2}" name="paddingLeft" value="30"/>
+			<mx:SetStyle target="{hbox1}" name="paddingTop" value="25"/>
+		</mx:State>
+	</mx:states>
+</mx:WindowedApplication>
